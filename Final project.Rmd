@@ -1,0 +1,1025 @@
+---
+title: "Time Series Final Project"
+author: "Bhavya Dinesh (s3980321)</br> Rishit Turakhia (s3935687)</br> Saksham Sharma (s3986713)</br> Samay Jain (s3963844)"
+date: "2024-06-06"
+output:
+  html_document:
+    toc: yes
+  'html_document:': default
+  pdf_document:
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, echo = FALSE, message = FALSE, warning=FALSE, results= 'hide'}
+library(TSA)
+library(fUnitRoots)
+library(lmtest)
+library(tseries)
+library(forecast)
+library(car)
+library(readr)
+library(bestglm)
+library(zoo)
+library(FitAR)
+library(fGarch)
+library(rugarch)
+```
+
+
+**Research Question:** 
+
+What is the most accurate forecasting model for predicting the gold price over the next 10 months?
+
+
+# Introduction
+
+The project aims to analyze gold price data from January 2000 to May 2024 and forecast gold prices for the next 10 months. To achieve this, ARIMA, SARIMA, and ARMA-GARCH models are fitted to the data. These models are evaluated and compared using statistical tools such as the coefficient test, AIC, BIC, and error metrics to identify the best model for predicting gold prices.  
+
+# Functions
+
+## Seasonal lag function 
+```{r, warning=FALSE}
+helper <- function(class = c("acf", "pacf"), ...) {
+  
+  # Capture additional arguments
+  params <- match.call(expand.dots = TRUE)
+  params <- as.list(params)[-1]
+  
+  # Calculate ACF/PACF values
+  if (class == "acf") {
+    acf_values <- do.call(acf, c(params, list(plot = FALSE)))
+  } else if (class == "pacf") {
+    acf_values <- do.call(pacf, c(params, list(plot = FALSE)))
+  }
+  
+  # Extract values and lags
+  acf_data <- data.frame(
+    Lag = as.numeric(acf_values$lag),  
+    ACF = as.numeric(acf_values$acf)   
+  )
+  
+  # Identify seasonal lags to be highlighted
+  seasonal_lags <- acf_data$Lag %% 1 == 0
+  
+  # Plot ACF/PACF values
+  if (class == "acf") {
+    do.call(acf, c(params, list(plot = TRUE)))
+  } else if (class == "pacf") {
+    do.call(pacf, c(params, list(plot = TRUE)))
+  }
+  
+  # Add colored segments for seasonal lags
+  for (i in which(seasonal_lags)) {
+    segments(x0 = acf_data$Lag[i], y0 = 0, x1 = acf_data$Lag[i], y1 = acf_data$ACF[i], col = "red")
+  }
+}
+
+
+# seasonal_acf ------------------------------------------------------------
+
+seasonal_acf <- function(...) {
+  helper(class = "acf", ...)
+}
+
+
+# seasonal_pacf -----------------------------------------------------------
+
+seasonal_pacf <- function(...) {
+  helper(class = "pacf", ...)
+}
+```
+
+## Diagnostic test 
+```{r, warning=FALSE}
+Diagnostic_test <- function(data, lag = 20, 
+                            mainacf = "ACF Plot", subacf = "", 
+                            mainpacf = "PACF Plot", subpacf = "", 
+                            mainhist = "Histogram", subhist = "", 
+                            mainqq = "Q-Q Plot", subqq = "", 
+                            test) {
+  if (test == "ACF-PACF") {
+    acf(data, lag.max = lag, main = mainacf, sub = subacf)
+    pacf(data, lag.max = lag, main = mainpacf, sub = subpacf)
+  } else if (test == 'Stationary') {
+    acf(data, lag.max = lag, main = mainacf, sub = subacf)
+    pacf(data, lag.max = lag, main = mainpacf, sub = subpacf)
+    adf_result <- adf.test(data)
+    pp_result <- pp.test(data)
+    return(list(adf_test = adf_result, pp_test = pp_result))
+  } else if (test == 'Normality') {
+    hist(data, main = mainhist, sub = subhist)
+    qqnorm(data, main = mainqq, sub = subqq)
+    qqline(data, col = 2)
+    shapiro_result <- shapiro.test(data)
+    return(shapiro_result)
+  } else if (test == "seasonal ACF-PACF") {
+    seasonal_acf(data, lag.max = lag, main = paste(mainacf, "(Seasonal)"), sub = subacf)
+    seasonal_pacf(data, lag.max = lag, main = paste(mainpacf, "(Seasonal)"), sub = subpacf)
+  } else if (test == 'seasonal Stationary') {
+    seasonal_acf(data, lag.max = lag, main = paste(mainacf, "(Seasonal)"), sub = subacf)
+    seasonal_pacf(data, lag.max = lag, main = paste(mainpacf, "(Seasonal)"), sub = subpacf)
+    adf_result <- adf.test(data)
+    pp_result <- pp.test(data)
+    return(list(adf_test = adf_result, pp_test = pp_result))
+  } else {
+    print("Please enter a valid type of test: 'ACF-PACF', 'Stationary', 'Normality', 'seasonal ACF-PACF', or 'seasonal Stationary'")
+  }
+}
+```
+
+## Residual analysis
+```{r}
+residual.analysis <- function(model, std = TRUE,start = 2, shift = 0, class = c("ARIMA","GARCH","ARMA-GARCH", "garch", "fGARCH")[1]){
+  library(TSA)
+  library(FitAR)
+  library(quantmod)
+  if (class == "ARIMA"){
+    if (std == TRUE){
+      res.model = Lag(rstandard(model),shift)
+      res.model = na.omit(res.model)
+    }else{
+      res.model = Lag(residuals(model),shift)
+      res.model = na.omit(res.model)
+    }
+  }
+  par(mfrow=c(3,2))
+  plot(res.model,type='o',ylab='Standardised residuals', main="Time series plot of standardised residuals")
+  abline(h=0)
+  hist(res.model,main="Histogram of standardised residuals")
+  qqnorm(res.model,main="QQ plot of standardised residuals")
+  qqline(res.model, col = 2)
+  acf(res.model,main="ACF of standardised residuals")
+  print(shapiro.test(res.model))
+  k=0
+  if (length(res.model) < 30){
+    lagM <- length(res.model) - 1
+  } else {
+    lagM <- 30
+  }
+  LBQPlot(res.model, lag.max = lagM, StartLag = k + 1, k = 0, SquaredQ = FALSE)
+  par(mfrow=c(1,1))
+}
+```
+
+# Data Exploration
+
+```{r, message=FALSE}
+data <- read_csv("C:/Users/HP/Downloads/RMIT/Sem 3/Time Series analysis/Gold Futures Historical Data.csv")
+```
+
+```{r, warning=FALSE}
+# Ordering the date in ascending order
+data$Date <- as.Date(data$Date, format = "%m/%d/%Y")
+data <- data[order(data$Date), ]
+```
+
+The dates are ordered in ascending order to preserve the structure of the data and, ensure that trends, and patterns are accurately captured, leading to a correct model estimation and forecasting. 
+
+## Converting to time series object
+
+```{r, warning=FALSE}
+data.ts <- ts(data$Price, start = c(2000, 1), end = c(2024, 5), frequency = 12)
+```
+
+# Descriptive Analysis
+
+-   Descriptive statistics
+-   Time series plot
+-   Impact of 1st lag gold price on current gold price
+-   Impact of 2nd lag gold price on current gold price
+
+## Descriptive statistics
+
+```{r, warning= FALSE}
+summary(data.ts)
+```
+
+The descriptive statistics indicate a range of gold price values from $259.2 to $2366.8. The median value of $1214.5 suggests that half the data points are below this value, while the mean of $1109.6 is the average of gold price from (Jan, 2000) to (May, 2024). The first quartile ($575.5) and third quartiles ($1564.2) shows the gold price spread, with the middle 50% of values falling between these points.
+
+## Time series plot
+
+```{r, warning=FALSE}
+plot(data.ts, type = "o", pch = 20, ylab = "Gold price", main = "Gold price time series", 
+     sub=  "Figure 1: Gold price time series")
+```
+
+Interpretation of Gold Price time series plot:
+
+- Trend: The gold price shows a clear upward trend over the entire period from 2000 to 2024.
+
+- Seasonality: From the plot, there is no obvious seasonal pattern observed in the data. The fluctuations and peaks do not appear to follow a regular, repeating pattern over a fixed period.
+
+- Changing Variance: The variance in gold prices increases over time. Early in the series (2001-2005), prices fluctuate within a relatively narrow range. However, as time progresses, the range of fluctuations increases, indicating higher volatility in later years.
+
+- Behavior: The time series plot has consecutive points following each other and indicates auto-regressive behavior, means that current gold prices are influenced by past prices.
+
+- Intervention: No intervention point is observed. However, there are multiple shifts in trend approximately around the years 2008, 2013, and 2019 .
+
+## Scatter plot
+
+```{r, warning=FALSE}
+# 1st lag
+y = data.ts
+x = zlag(data.ts)
+
+# 1st lag plot
+plot(y=data.ts, x = zlag(data.ts), ylab = 'Gold_price', xlab = 'Gold price in the previous month', main = "Scatter plot of neighboring gold price values", 
+     sub = "Figure 2: Scatter plot of gold price and 1st lag values")
+
+# 1st lag correlation
+index = 2:length(data.ts) 
+cor(y[index],x[index])
+```
+The high correlations observed in the scatter plots from figures 2 indicate a strong relationship between the current month's gold price and its prices in the previous month.
+
+```{r, warning=FALSE}
+# 2nd lag
+z = zlag(x)
+
+# 2nd alg plot
+plot(y=data.ts, x = zlag(zlag(data.ts)), ylab = 'Gold_price', xlab = 'Gold price in the 2nd previous month', main = "Scatter plot of 2nd lag gold price adn gold price values ", sub = "Figure 3: Scatter plot of gold price and 2nd lag values")
+
+# 2nd lag correlation
+index = 3:length(z) 
+cor(y[index],z[index])
+```
+
+The high correlations observed in the scatter plots from figure 3 indicate a strong relationship between the current month's gold price and its prices in the previous 2 months. Specifically, gold price correlation of (0.9947) with 1st lag and (0.9905) with 2nd lag suggest that the gold price series has strong autoregressive characteristics.
+
+# Test of stationary
+
+The following tests are performed to check for the stationarity in the data:
+
+-   ACF plot
+-   PACF plot
+-   ADF test
+-   PP test
+
+
+
+```{r, warning=FALSE}
+
+Diagnostic_test(data.ts, lag = 300, mainacf = 'ACF of gold price data', subacf = "Figure 4: ACF plot of gold price data",mainpacf = 'PACF of gold price data data', subpacf = "Figure 5: PACF plot of gold price data", test = "Stationary")
+```
+
+The ACF plot in figure 4 shows a slowly decaying and wave pattern suggesting the presence of trend and seasonality in the series. The PACF plot in figure 5 shows 1st lag highly significant. Both ADF and PP test have a p-value > 0.05, which means that the null hypothesis can not be rejected at 5% significance level, indicating the series in non-stationary. Due to the presence of seasonality in the series, SARIMA models will be fitted.
+
+# Test of Normality
+
+The following are checked to test for the normality in the data:
+
+-   Histogram
+-   Normal QQ plot
+-   Shapiro-Wilk test
+
+```{r, warning=FALSE}
+Diagnostic_test(data.ts, mainhist = "Histogram of gold price series", subhist = "Figure 6: Histogram of gold price series", subqq = "Figure 7: QQ Plot of gold price series", test = "Normality")
+```
+The histogram in figure 6 is not symmetric, and there are outliers present in the series. The QQ-plot in figure 7 shows majority of data points deviate from the normality line and shows presence of outliers in the series. Likewise, the Shapiro test p value is < 0.05 therefore suggesting the data is not normally distributed.
+
+To deal with normality, box transformation is applied, and to remove the trend and attain stationarity, differencing is applied.
+
+# Box-Cox Transformation
+
+```{r, warning = FALSE}
+BC <- BoxCox.ar(y=data.ts, lambda=seq(-2, 2, 0.01)) 
+mtext('Figure 8: Box-Cox Transformation: Log-Likelihood vs. Lambda.',line = 4, side = 1, cex = 0.8)
+BC$ci
+```
+
+```{r, warning=FALSE}
+# BoxCox lambda value
+lambda <- BC$lambda[which(max(BC$loglike) == BC$loglike)]
+lambda
+BC.data = log(data.ts)
+```
+
+From figure 8, it can be observed the lambda value is -0.08 which is close to 0. Therefore, log transformation is applied on the series.
+
+```{r, warning=FALSE}
+# Plot of normalised gold price series
+plot(BC.data,type='o', pch = 20, ylab = "Normalised Gold Price", main='Log transformed gold price series', sub = "Figure 9: Log transformed gold price series")
+
+Diagnostic_test(BC.data, subhist = "Figure 10: Histogram of log transformed data", subqq = "Figure 11: QQ plot of Log transformed gold price series", test = "Normality")
+```
+
+After applying log transformation on the series, the series did not achieve normality. QQ-plot in figure 11 still shows high deviation of data points with respect to the line of normality. Further, Shapiro-Wilk's test of normality gives a p value < 0.05, and it is worse than that of untransformed series. Therefore, original data is used for further analysis. 
+
+# Differencing
+
+## First differencing
+
+```{r, warning=FALSE}
+diff.ts = diff(data.ts)
+plot(diff.ts,type='o',ylab='First difference values', main ="Time series plot of the first difference of transformed gold price series.", sub = 'Figure 12: 1st difference series')
+```
+
+Figure 12 shows the first difference plot of the gold price series. The plot has a flat mean level indicating no trend, however, the high fluctuations in the differenced series suggest presence of changing variance. McLeod Li test is performed to check for the changing variance in the differenced series.
+
+```{r, warning=FALSE}
+McLeod.Li.test(y=diff.ts, main ="McLeod Li test for differenced series", sub = "Figure 13: McLeod Li test for differenced series")
+```
+
+Figure 13 displays the McLeod Li test for the first difference gold price series. Since the transformation does not help, so MclLeod Li test is applied on first difference oof gold price series. All the lags are beyond the 5% significant level which suggests that the series has changing variance. Due to changing variance, ARMA-GARCH models will be fitted.
+
+### First difference series stationary test
+
+```{r, warning=FALSE}
+Diagnostic_test(diff.ts, 100, mainacf = "ACF for First differenced Gold price series", subacf = "Figure 14: ACF plot of first difference gold price time series", mainpacf = "PACF for First differenced Gold price series", subpacf = "Figure 15: PACF plot of first difference gold price time series", test = "Stationary")
+```
+
+The ACF plot in figure 14 doesn't show any pattern, the PACF plot in figure 15 doesn't show any highly significant lag suggesting stationary in the series.
+
+ADF and PP test have a p-vale < 0.05, suggesting the null hypothesis can be rejected at 5% significance level, indicating stationary.
+
+Stationarity is achieved by first difference of gold price series. Consequently, for ARIMA(p,d,q) models, 1st difference will be used.
+
+# ARIMA models
+The following 3 methods are used to identify potential models.
+
+- Significant lags from ACF and PACF plots
+- EACF plot
+- BIC table
+
+## Significant lags in ACF and PACF plot
+From figure 14, ACF shows 1 significant lag (late lags are ignored), so q = 1. From figure 15, PACF shows 1 lag significant (late lags are ignored), so p = 1
+
+Model identified from ACF and PACF plot of the differenced series:
+
+- ARIMA(1,1,1) 
+
+## EACF plot
+```{r, warning=FALSE}
+eacf(diff.ts, ar.max = 5, ma.max = 5)
+```
+The top-left "o" identified in the EACF plot is (0,0)
+
+Neighbor models:
+
+- ARIMA(0,1,0) 
+- ARIMA(0,1,1)
+- ARIMA(1,1,1)
+
+There are no AR/MA subsets in ARIMA(0,1,0), so is not considered for analysis.
+
+## BIC plot
+```{r, warning = FALSE}
+res = armasubsets(y=diff.ts,nar=4,nma=4,y.name='p',ar.method='ols')
+plot(res)
+mtext('Figure 16:BIC Table',line = 4, side = 1, cex = 0.8)
+```
+
+From BIC table following model the top model has the lowest BIC value(7.2):
+
+- ARIMA(0,1,4)
+
+# Parameter Estimation
+
+## ARIMA(0,1,1)
+```{r, warning=FALSE}
+model.011 = Arima(data.ts,order=c(0,1,1),method='ML')
+coeftest(model.011)
+```
+
+```{r, warning=FALSE}
+model.011css = Arima(data.ts,order=c(0,1,1),method='CSS')
+coeftest(model.011css)
+```
+
+No coefficients are significant for model.011 at 5% significance level.
+
+## ARIMA(1,1,1)
+```{r, warning=FALSE}
+model.111 = Arima(data.ts,order=c(1,1,1),method='ML')
+coeftest(model.111)
+```
+
+```{r, warning=FALSE}
+model.111css = Arima(data.ts,order=c(1,1,1),method='CSS')
+coeftest(model.111css)
+```
+
+No coefficients are significant for model.111
+
+## ARIMA(0,1,4)
+
+```{r, warning=FALSE}
+model.014 = Arima(data.ts,order=c(0,1,4),method='ML')
+coeftest(model.014)
+```
+
+```{r, warning=FALSE}
+model.014css = Arima(data.ts,order=c(0,1,4),method='CSS')
+coeftest(model.014css)
+```
+No coefficients are significant for model.014
+
+Model.011 is the best model based in coefficient testing.
+
+## AIC and BIC values
+
+The AIC and BIC scores are calculated using "ML" methods. 
+
+```{r, warning=FALSE}
+
+aic_table =AIC(model.011, model.111, model.014)
+bic_table =BIC(model.011, model.111, model.014)
+
+sorted_aic_table <- aic_table[order(aic_table$AIC), ]
+sorted_bic_table <- bic_table[order(bic_table$BIC), ]
+
+sorted_aic_table
+sorted_bic_table
+```
+From the AIC and BIC score, model.011 is the best model.
+
+## Error measures
+
+```{r, warning=FALSE}
+Smodel.011 = accuracy(summary(model.011))
+Smodel.111 = accuracy(summary(model.111))
+Smodel.014 = accuracy(summary(model.014))
+
+headers <- c("ME", "RMSE", "MAE", "MPE", "MAPE", "MASE", "ACF1")
+
+merged_table <- data.frame(rbind
+    ( c(Smodel.011), c(Smodel.111),c(Smodel.014)))
+model_names <- c("model.011", "model.111","model.014")
+
+rownames(merged_table) <- model_names
+colnames(merged_table) <- headers
+merged_table
+```
+The error metrics shows very close values for all the models.  
+
+Based on coef_test, AIC, BIC, and error metrics, model.011 is the best model.
+
+# Over-parameterisation
+Parameter tuning is done to identify any further potential models.
+
+The following models will be tested under parameter tuning:
+
+- ARIMA(0,1,2)
+- ARIMA(1,1,1)
+
+We have already tested the ARIMA(1,1,1) model and concluded that it wasn't a significant model.
+
+Parameter estimation is conducted on ARIMA(0,1,2) model.
+
+## ARIMA(0,1,2)
+```{r, warning=FALSE}
+model.012 = Arima(data.ts,order=c(0,1,2),method='ML')
+coeftest(model.012)
+```
+
+```{r, warning=FALSE}
+model.012css = Arima(data.ts,order=c(0,1,2),method='CSS')
+coeftest(model.012css)
+```
+No coefficients are significant for model.012 at 5% level. Hence, we can ignore this model.
+
+ARIMA models gives us model.011 as the best option, however, we will try different approaches to get the best model.
+
+# SARIMA models
+
+## ACF and PACF plot
+
+Plotting ACF(figure 3) and PACF(figure 4) of gold price series again
+```{r, echo=FALSE}
+Diagnostic_test(data.ts, 300, "ACF for Gold price series", "Figure 3: ACF plot of gold price time series", "PACF for Gold price series", "Figure 4: PACF plot of gold price time series", test = "ACF-PACF")
+```
+
+ 
+The ACF plots in figure 3 revealed presence of trend and seasonality, SARIMA models are fitted on the series.
+
+To remove the trend, 1st seasonal difference is applied
+
+**Seasonal Difference (D=1)**
+```{r, warning  = FALSE}
+# Plain model fit with 1st differencing
+m1.gold = Arima(data.ts,order=c(0,0,0), seasonal=list(order=c(0,1,0), period=12)) 
+
+# m1 residuals
+res.m1 = rstandard(m1.gold)
+plot(res.m1,xlab='Time',ylab='Residuals', main="Time series plot of the residuals.", sub = "Figure 17: Time series of residuals")
+
+Diagnostic_test(res.m1, 48, mainacf = "The sample ACF of the residuals", subacf = "Figure 18: Sample ACF plot of residulas", mainpacf = "The sample PACF of the residuals", subpacf = "Figure 19: Sample PACF plot of residuals", test = "seasonal Stationary")
+```
+
+The first seasonal difference residual plot(Figure 17) still has trend and fluctuations.
+
+The 1st seasonal difference fitted series has a trend, but, the series is stationary as suggested by ADF and PP test. The PACF plot has 1st seasonal lag significant, so P = 1. The ACF plot has 1st, and 2nd seasonal lag significant, so, Q=2 is applied to in the model to get rid of seasonal component.
+
+**Seasonal parameter ((P,Q) = (1,2))**
+```{r, warning  = FALSE}
+m2.gold = Arima(data.ts,order=c(0,0,0),seasonal=list(order=c(1,1,2), period=12,  method="ML"))
+
+res.m2 = rstandard(m2.gold)
+
+plot(res.m2,xlab='Time',ylab='Residuals',main="Time series plot of the residuals.",sub = "Figure m2.1: Time series of residuals")
+
+Diagnostic_test(res.m2, 48, mainacf = "The sample ACF of the residuals", subacf = "Figure 20: Sample ACF plot of residulas", mainpacf = "The sample PACF of the residuals", subpacf = "Figure 21: Sample PACF plot of residuals", test = "seasonal ACF-PACF")
+```
+
+The seasonal parameter fitted residual plot(Figure m2.1) still has trend and fluctuations.
+
+There is a high auto correlation at the first lag of PACF, and nearly all the auto correlations are significant before the first seasonal lag in ACF. So, first ordinary difference is applied to remove this trend.
+
+**Ordinal difference (d=1)**
+```{r, warning = FALSE}
+m3.gold = Arima(data.ts, order=c(0,1,0), seasonal= list(order=c(1,1,2), period=12,  method="ML"))
+
+res.m3 = rstandard(m3.gold)
+plot(res.m3,xlab='Time',ylab='Residuals',main="Time series plot of the residuals.", sub = "Figure m3.1: Time series of residuals")
+
+Diagnostic_test(res.m3, 48, mainacf = "The sample ACF of the residuals", subacf = "Figure 22: Sample ACF plot of residulas", mainpacf = "The sample PACF of the residuals", subpacf = "Figure 23: Sample PACF plot of residuals", test = "seasonal ACF-PACF")
+```
+
+The first ordinal difference residual plot(Figure m3.1) has a flat mean level but has high fluctuations.
+
+After applying 1st ordinal differencing, there is no trend. There are 2 significant lags in ACF, q = 2. There are 2 significant lags in PACF, p = 2
+
+**Ordinal parameter (p,q) = (2,2)**
+```{r, warning=FALSE}
+
+m4.gold = Arima(data.ts, order=c(2,1,2),seasonal=list(order=c(1,1,2), period=12,  method="ML"))
+
+res.m4 = rstandard(m4.gold)
+plot(res.m4,xlab='Time',ylab='Residuals', main="Time series plot of the residuals.", sub = "Figure m4.1: Time series of residuals")
+
+Diagnostic_test(res.m4, 48, "The sample ACF of the residuals", "Figure 24: Sample ACF plot of residulas", "The sample PACF of the residuals", "Figure 25: Sample PACF plot of residuals", test = "seasonal ACF-PACF")
+```
+
+The ordinal fitted parameter residual plot(Figure m4.1) has a flat mean level but has high fluctuations.
+
+From the ACF and PACF plots of the residuals, SARIMA(2,1,2)x(1,1,2)_12 is the identified as a potential model.
+
+## EACF
+
+```{r, warning=FALSE}
+eacf(res.m3)
+```
+From the EACF plot following models are identified:
+
+- SARIMA(0,1,1)x(1,1,2)_12
+
+Neighbor models:
+
+- SARIMA(0,1,2)x(1,1,2)_12
+- SARIMA(1,1,1)x(1,1,2)_12
+- SARIMA(1,1,2)x(1,1,2)_12
+
+## BIC
+
+```{r, warning - FALSE, message = FALSE}
+bic_table = armasubsets(y=res.m3,nar=4,nma=4,y.name='p',ar.method='ols') 
+plot(bic_table)
+```
+
+From the BIC table following model is identified:
+- SARIMA(0,1,4)x(1,1,2)_12
+
+# Parameter Estimation
+
+## SARIMA(2,1,2)x(1,1,2)_12
+
+```{r warning=FALSE, message = FALSE}
+m_212_112_12 = Arima(data.ts, order=c(2,1,2), seasonal=list(order=c(1,1,2), period=12), method = "ML")
+coeftest(m_212_112_12)
+residual.analysis(model = m_212_112_12)
+```
+
+For SARIMA(2,1,2)x(1,1,2)_12 "ML" model, all seasonal coefficients are significant whereas, ordinal coefficients are insignificant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals. 
+
+```{r warning=FALSE}
+m_212_112_12CSS = Arima(data.ts, order=c(2,1,2), seasonal=list(order=c(1,1,2), period=12), method = "CSS")
+coeftest(m_212_112_12CSS)
+residual.analysis(model = m_212_112_12CSS)
+```
+
+For SARIMA(2,1,2)x(1,1,2)_12 "CSS" model, all seasonal coefficients are insignificant whereas, ordinal coefficients are significant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## SARIMA(0,1,1)x(1,1,2)_12
+
+```{r warning=FALSE}
+m_011_112_12 = Arima(data.ts,order=c(0,1,1),seasonal=list(order=c(1,1,2), period=12),method = "ML")
+coeftest(m_011_112_12)
+residual.analysis(model = m_011_112_12)
+```
+
+For SARIMA(0,1,1)x(1,1,2)_12 "ML" model, all coefficient except "sma2", are significant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+```{r warning=FALSE}
+m_011_012_12CSS = Arima(data.ts,order=c(0,1,1),seasonal=list(order=c(1,1,2), period=12),method = "CSS")
+coeftest(m_011_012_12CSS)
+residual.analysis(model = m_011_012_12CSS)
+```
+
+For SARIMA(0,1,1)x(1,1,2)_12 "CSS" model, only "ma1" and "sma1" are significant, whereas, "sar1" and "sma2" are insignificant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## SARIMA(0,1,2)x(1,1,2)_12
+
+```{r warning=FALSE}
+m_012_112_12 = Arima(data.ts,order=c(0,1,2),seasonal=list(order=c(1,1,2), period=12),method = "ML")
+coeftest(m_012_112_12)
+residual.analysis(model = m_012_112_12)
+```
+
+For SARIMA(0,1,2)x(1,1,2)_12 "ML" model, all coefficients except "ma2" are significant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+```{r warning=FALSE}
+m_012_112_12CSS = Arima(data.ts,order=c(0,1,2),seasonal=list(order=c(1,1,2), period=12),method = "CSS")
+coeftest(m_012_112_12CSS)
+residual.analysis(model = m_012_112_12CSS)
+```
+For SARIMA(0,1,2)x(1,1,2)_12 "CSS" model, only "ma1" and "sma1" are significant, whereas, "sar1" and "sma2" are insignificant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## SARIMA(1,1,1)x(1,1,2)_12
+
+```{r warning=FALSE}
+m_111_112_12 = Arima(data.ts,order=c(1,1,1),seasonal=list(order=c(1,1,2), period=12),method = "CSS")
+coeftest(m_111_112_12)
+residual.analysis(model = m_111_112_12)
+```
+
+For SARIMA(1,1,1)x(1,1,2)_12 "CSS" model, only "sma1" is significant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+##SARIMA(1,1,2)x(1,1,2)_12
+```{r warning=FALSE}
+m_112_112_12 = Arima(data.ts,order=c(1,1,2),seasonal=list(order=c(1,1,2), period=12),method = "ML")
+coeftest(m_112_112_12)
+residual.analysis(model = m_112_112_12)
+```
+We observe NaN values in the coefficient test. This could be because of 0 values in the model.
+
+```{r warning=FALSE}
+m_112_112_12CSS = Arima(data.ts,order=c(1,1,2),seasonal=list(order=c(1,1,2), period=12),method = "CSS")
+coeftest(m_112_112_12CSS)
+residual.analysis(model = m_112_112_12CSS)
+```
+For SARIMA(1,1,2)x(1,1,2)_12 "CSS" model, all ordinal components are significant, whereas, all seasonal components are insignificant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+##SARIMA(0,1,4)x(1,1,2)_12
+
+```{r warning=FALSE}
+m_014_112_12 = Arima(data.ts,order=c(0,1,4),seasonal=list(order=c(1,1,2), period=12),method = "ML")
+coeftest(m_014_112_12)
+residual.analysis(model = m_014_112_12)
+```
+For SARIMA(0,1,4)x(1,1,2)_12 "ML" model, only "ma1", "sar1", and "sma1" are significant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+```{r warning=FALSE}
+m_014_112_12CSS = Arima(data.ts,order=c(0,1,4),seasonal=list(order=c(1,1,2), period=12),method = "CSS")
+coeftest(m_014_112_12CSS)
+residual.analysis(model = m_014_112_12CSS)
+```
+
+For SARIMA(0,1,4)x(1,1,2)_12 "CSS" model, only "ma1" and "sma1" are significant. The residual plot has a flat mean level indicating no trend. The histogram is symmetric and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the tails. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+
+Based on coefficient testing and residual analysis, SARIMA(0,1,1)x(1,1,2)_12 is the best model option.
+
+# Goodness of fit 
+
+## AIC and BIC values
+
+The AIC and BIC scores are calculated using "ML" methods. SARIMA_111_112_12 is not a compatible model for "ML" method. Therefore, it is excluded from the matrix.
+
+```{r, warning=FALSE}
+
+aic_table =AIC(m_212_112_12,m_011_112_12,m_012_112_12,m_112_112_12, m_014_112_12)
+bic_table =BIC(m_212_112_12,m_011_112_12,m_012_112_12,m_112_112_12, m_014_112_12)
+
+sorted_aic_table <- aic_table[order(aic_table$AIC), ]
+sorted_bic_table <- bic_table[order(bic_table$BIC), ]
+
+sorted_aic_table
+sorted_bic_table
+```
+Based on AIC and BIC scores, SARIMA(0,1,1)x(1,1,2)_12 is the best model option.
+
+## Error measures
+
+```{r, warning=FALSE}
+Smodel.011 = accuracy(summary(m_212_112_12))
+Smodel.012 = accuracy(summary(m_011_112_12))
+Smodel.111 = accuracy(summary(m_012_112_12))
+Smodel.112 = accuracy(summary(m_111_112_12))
+Smodel.014 = accuracy(summary(m_112_112_12))
+Smodel.212 = accuracy(summary(m_014_112_12))
+
+
+
+headers <- c("ME", "RMSE", "MAE", "MPE", "MAPE", "MASE", "ACF1")
+
+merged_table <- data.frame(rbind
+    ( c(Smodel.011), c(Smodel.012),c(Smodel.111),c(Smodel.112),c(Smodel.014),(Smodel.212)))
+model_names <- c("model.011", "model.012", "model.111","model.112","model.014","model.212")
+
+rownames(merged_table) <- model_names
+colnames(merged_table) <- headers
+merged_table
+```
+The error measures have very close values for all models.
+
+In conclusion, we use SARIMA(0,1,1)x(1,1,2)_12) model.
+
+# Over-parameterisation
+Parameter tuning is done to identify any further potential models.
+
+The following models will be tested under parameter tuning:
+
+- SARIMA(0,1,2)x(1,1,2)_12
+- SARIMA(1,1,1)x(1,1,2)_12
+
+We have already tested the SARIMA(0,1,2)x(1,1,2)_12, and SARIMA(1,1,1)x(1,1,2)_12 model and concluded that they weren't significant models.
+
+# Model Specification ARMA x GARCH Part 1
+
+Since our time series data had changing variance we had to consider ARMA x GARCH model for making our predictions. After applying the log transformation with the first order of differencing the following time series plot is displayed.
+
+```{r, warning=FALSE}
+r.gold <- diff(log(data.ts))*100
+plot(r.gold, ylab = "Gold price", main ="Return series for Gold price",sub = "Figure 26: Return series for Gold price")
+
+```
+
+It is clear from the Figure 26 that there is a changing variance in the return series. To verify this we will conduct the McLeod Li test on the return series.
+
+```{r, warning=FALSE}
+McLeod.Li.test(y=r.gold,main ="McLeodLi Test for Changing Variance", sub = "Figure 27: McLeodLi Test for Changing Variance")
+```
+
+From the above Figure 27, the p-value at each lag is below the significance level of 0.05 that means there is changing variance in the return series.
+
+## Stationary test
+
+In the return series, the volatility is obvious and there is no sense of trend or seasonality. The stationarity of the return series is confirmed by the ADF test. To support the ADF test, we will go on with displaying the ACF and PACF plots.
+
+```{r, warning=FALSE}
+Diagnostic_test(r.gold, 48, mainacf = "ACF plot for return series", subacf = "Figure 28: ACF plot for return series", mainpacf ="PACF plot for return series",subpacf = "Figure 29: PACF plot for return series", test = "Stationary")
+```
+
+The PACF plot in figure 29 shows the 1st lag significant indicating the value of p=1. Whereas, the ACF plot in figure 28 shows 1st lag is significant indicating the value of q=1.
+
+In total ACF and PACF Plots propose 1 set of possible models: {ARMA(1,1)}
+
+## EACF ARMA
+
+```{r, warning=FALSE}
+eacf(r.gold)
+```
+
+The top-left "o" is identified in the EACF plot is at (0,1). From the EACF plot following models are identified:
+
+- ARMA(0,1) 
+
+Neighbor models:
+
+- ARMA(0,2) 
+- ARMA(1,1) 
+- ARMA(1,2)
+
+## BIC ARMA
+
+```{r, warning=FALSE}
+par(mfrow=c(1,1))
+bic_table = armasubsets(y=r.gold,nar=4,nma=4,y.name='p',ar.method='ols')
+plot(bic_table)
+```
+
+From the BIC table following model is identified: - ARMA(0,4)
+
+# Parameter Estimation ARMA
+
+Combining all the possible models from ACF, PACF, EACF and BIC table, we get
+
+- ARMA(0,4) 
+- ARMA(0,1) 
+- ARMA(0,2) 
+- ARMA(1,1) 
+- ARMA(1,2)
+
+## ARMA (0,4)
+
+```{r warning=FALSE}
+m.04 = Arima(r.gold,order=c(0,0,4),method='ML')
+coeftest(m.04)
+residual.analysis(model=m.04, std = TRUE, class = "ARIMA")
+```
+
+For ARMA(0,4) “ML” model, only "ma1" is significant, whereas, all components are insignificant. The residual plot has a flat mean level indicating no trend. The histogram is left skewed and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the left tail. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## ARMA (0,1)
+
+```{r, warning=FALSE}
+m.01 = Arima(r.gold,order=c(0,0,1),method='ML')
+coeftest(m.01)
+residual.analysis(model=m.01, std = TRUE, class = "ARIMA")
+```
+
+For ARMA(0,1) “ML” model had all coefficient significant. The residual plot has a flat mean level indicating no trend. The histogram is left skewed and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the left tail. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## ARMA (0,2)
+
+```{r, warning=FALSE}
+m.02 = Arima(r.gold,order=c(0,0,2),method='ML')
+coeftest(m.02)
+residual.analysis(model=m.02, std = TRUE, class = "ARIMA")
+```
+
+For ARMA(0,2) “ML” model had "ma1" coefficient significant. The residual plot has a flat mean level indicating no trend. The histogram is left skewed and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the left tail. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## ARMA (1,1)
+
+```{r, warning=FALSE}
+m.11 = Arima(r.gold,order=c(1,0,1),method='ML')
+coeftest(m.11)
+residual.analysis(model=m.11, std = TRUE, class = "ARIMA")
+```
+
+For ARMA(1,1) “ML” model had no coefficient significant. The residual plot has a flat mean level indicating no trend. The histogram is left skewed and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the left tail. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+## ARMA (1,2)
+
+```{r, warning=FALSE}
+m.12 = Arima(r.gold,order=c(1,0,2),method='ML')
+coeftest(m.12)
+residual.analysis(model=m.12, std = TRUE, class = "ARIMA")
+```
+
+For ARMA(1,2) “ML” model had no coefficient significant. The residual plot has a flat mean level indicating no trend. The histogram is left skewed and indicates outliers. Most of the residuals follows the line of normality but their are some deviation at the left tail. Shapiro-Wilk test has a p-value < 0.05, indicating non-normality. Ljung-Box test shows all lags above the significance level, therefore, no auto-correlation is present in the residuals.
+
+To conclude, ARMA(0,1) had all the coefficients significant. Therefore we can say ARMA(0,1) is the most suited model.
+
+# Model Specification ARMA x GARCH Part 2
+
+```{r, warning=FALSE}
+abs.r.res.gold = abs(rstandard(m.01))
+sq.r.res.gold = rstandard(m.01)^2
+```
+
+## ACF and PACF absolute
+
+```{r}
+Diagnostic_test(abs.r.res.gold, mainacf="ACF plot for abs residual return series", subacf = "Figure 30: ACF plot for abs residual return series", mainpacf = "PACF plot for abs residual return series", subpacf = "Figure 31: PACF plot for abs residual return series", test = "ACF-PACF")
+```
+To get the value of (p,q), first 5 lags are considered from ACF and PACF plot
+
+From Figure 30 ACF plot, there are no significant lags, q = 0 and from Figure 31 PACF plot, there are no lags significant, so p = 0.
+
+max(p,q) = 0 q = 0 max(p,q = 0) does not lead to any models. 
+
+## EACF abs garch
+
+```{r, warning=FALSE}
+eacf(abs.r.res.gold)
+```
+
+Top left "o" is in (0,0) 
+- max(p,q) = 0 and q=0 => max(p,q = 0) = 0; does not lead any models.
+
+Neighbor models:
+
+- max(p,q) = 0 and q = 1 => max(p,q = 1) = 0; does not lead any models.
+- max(p,q)= 1 and q = 1 => max(p,q = 1) = 1, hence p = 0 or 1
+
+{GARCH(0,1) and GARCH(1,1)}
+
+## ACF and PACF squared
+```{r, warning = FALSE}
+Diagnostic_test(sq.r.res.gold, mainacf="ACF plot for squared residual return series", subacf = "Figure 32: ACF plot for squared residual return series", mainpacf = "PACF plot for squared residual return series", subpacf = "Figure 33: PACF plot for squared residual return series", test = "ACF-PACF")
+```
+
+From Figure 32 ACF plot we get q = 2 and from Figure 33 PACF plot we get p =2.
+
+max(p,q) = 2 q = 2 max(p,q = 2), we get p = 0,1,2
+
+GARCH {0,2},GARCH {1,2} and  GARCH {2,2}
+
+## EACF sqaured
+
+```{r, warning=FALSE}
+eacf(sq.r.res.gold)
+```
+
+
+- max(p,q) = 0 and q = 2 => max(p,q = 2) = 0; does not lead any models.
+
+Neighbor models:
+
+- max(p,q) = 0 and q = 3 => max(p,q = 3) = 0; does not lead any models.
+- max(p,q) = 1 and q = 2 => max(p,q = 2) = 1; does not lead any models.
+- max(p,q) = 1 and q = 3 => max(p,q = 3) = 1; does not lead any models
+
+GARCH {0,2} GARCH {1,2} GARCH {2,2}
+
+# Parameter Estimation ARMA x GARCH
+
+```{r, warning=FALSE}
+m.01.01<- fGarch::garchFit(~ arma(0,1)+garch(1,0),
+data = r.gold, trace=F)
+m.01.11<- fGarch::garchFit(~ arma(0,1)+garch(1,1),
+data = r.gold, trace=F)
+m.01.02<- fGarch::garchFit(~ arma(0,1)+garch(2,0),
+data = r.gold, trace=F)
+m.01.12<- fGarch::garchFit(~ arma(0,1)+garch(2,1),
+data = r.gold, trace=F)
+m.01.22<- fGarch::garchFit(~ arma(0,1)+garch(2,2),
+data = r.gold, trace=F)
+```
+
+```{r, warning=FALSE}
+summary(m.01.01)
+```
+No coefficients are significant for m.01.01
+
+```{r, warning=FALSE}
+summary(m.01.11)
+```
+Only 2 coefficients are significant for m.01.11
+
+```{r, warning=FALSE}
+summary(m.01.02)
+```
+No coefficients are significant for m.01.02
+
+```{r, warning=FALSE}
+summary(m.01.12)
+```
+
+Only 1 coefficient is significant for m.01.12
+
+```{r, warning=FALSE}
+summary(m.01.22)
+```
+
+No coefficients are significant for m.01.22
+
+Summary analysis gave ARMA(0,1) X GARCH(1,1) as best model for forecast.
+
+# Forecasting
+
+
+# ARIMA forecast:
+```{r, warning=FALSE}
+
+m5_011 = Arima(data.ts,order=c(0,1,1), 
+                         lambda = 0, method = "ML")
+preds1 = forecast(m5_011, lambda = 0, h = 10)
+preds1
+plot(preds1, sub = "Figure 34: Forecast from ARIMA model")
+```
+
+The best ARIMA model is ARIMA(0,1,1). The forecast from this model shows consistent values over the next 10 months.
+
+
+# ARMA x GARCH forecast:
+```{r, warning=FALSE}
+spec <- ugarchspec(variance.model = list(model = "sGARCH",
+garchOrder = c(1, 1)
+),
+mean.model = list(armaOrder = c(0, 1)))
+model_401_11_2 <- ugarchfit(spec = spec, data = r.gold,
+solver = "hybrid",
+solver.control = list(trace=0))
+frc <- ugarchforecast(model_401_11_2,n.ahead=10,data=r.gold)
+frc
+
+plot(frc, which = 1, sub = "Figure 35: Forecast of ARMA-GARCH series")
+mtext('Figure 35: Forecast of ARMA-GARCH series',line = 4, side = 1, cex = 0.8)
+plot(frc, which = 3, sub = "Figure 36: Forecast of ARMA-GARCH sigma")
+mtext('Figure 36: Forecast of ARMA-GARCH sigma',line = 4, side = 1, cex = 0.8)
+```
+
+Based on the ARMA-GARCH model, the forecast for the next 10 months is consistent, indicating stable predicted values. However, the high variance within the yellow highlighted area suggests significant uncertainty in the forecast, underscoring the potential for considerable deviation from the central trend.
+
+The ARMA-GARCH model's forecast indicates a rising trend in volatility over the next 10 months. While the historical sigma values indicates fluctuations, the forecast suggests that volatility will increase consistently. This rising trend in forecasted volatility highlights the growing uncertainty and potential risk in the series during the forecast period.
+
+# SARIMA forecast:
+```{r, warning=FALSE}
+m_011_112_12 = Arima(data.ts,order=c(0,1,1),seasonal=list(order=c(1,1,2), period=12), lambda = 0, method = "ML") 
+preds1 = forecast(m_011_112_12, lambda = 0, h = 10)
+preds1
+plot(preds1, main = "Forecast from SARIMA_011_112_12", sub = "Figure 37: Forecast of SARIMA series")
+```
+
+The SARIMA(0,1,1)(1,1,2)[12] model forecasts a continued upward trend over the next 10 months, with increasing uncertainty as time progresses.
+
+# Conclusion
+
+Based on the analysis, both ARIMA and ARMA-GARCH models did not get significant results, making their forecasts unreliable. In contrast, the SARIMA model proved to be the most effective, as evidenced by residual analysis, goodness of fit metrics (AIC, BIC), error metrics, and significant coefficients. Specifically, the SARIMA((0,1,1)(1,1,2)_12 model emerged as the best fit.
+
+The forecast from the SARIMA model indicates an upward trend for the next 10 months.
+
+
+# Reference 
+[1] Demirhan, H 2024, lecture and lab notes, Time Series, RMIT University, Melbourne
+
+[2] Tran L, Pham, T 2024, seasonality function, Time Series, RMIT University, Melbourne
