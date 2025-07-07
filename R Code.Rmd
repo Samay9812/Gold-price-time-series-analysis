@@ -1,6 +1,6 @@
 ---
 title: "Time Series Final Project"
-author: "Bhavya Dinesh (s3980321)</br> Rishit Turakhia (s3935687)</br> Saksham Sharma (s3986713)</br> Samay Jain (s3963844)"
+author: "Samay Jain (s3963844)"
 date: "2024-06-06"
 output:
   html_document:
